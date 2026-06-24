@@ -2,11 +2,14 @@
 Módulo 1 — Facebook Ad Library Scraper
 
 Busca anuncios activos en EEUU usando la Graph API v25.0.
-Filtra por anuncios con 90+ días de antigüedad (señal de conversión).
+Clasifica cada anuncio en un semáforo de 3 niveles (verde/amarillo/rojo)
+combinando días activo, variedad creativa y expansión multi-país (ver
+utils/scoring.py), en vez de un corte binario fijo de 90 días.
 Exporta CSV ordenado por días activo descendente.
 """
 
 import csv
+import json
 import logging
 import os
 import sys
@@ -15,7 +18,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
@@ -27,11 +29,13 @@ from config import (
     FB_OUTPUT_FILENAME,
     KEYWORDS,
     MAX_ADS_PER_KEYWORD,
-    MIN_DAYS_ACTIVE,
+    MULTI_GEO_CHECK_COUNTRIES,
+    MULTI_GEO_CHECK_LIMIT,
 )
+from utils.display import console, semaforo_label
+from utils.scoring import PERSISTENCE_YELLOW_DAYS, score_signals
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 OUTPUT_DIR = Path(__file__).parent.parent / "output"
 
@@ -85,7 +89,7 @@ def _fetch_all_ads_for_keyword(token: str, keyword: str) -> list[dict]:
     params = {
         "access_token": token,
         "search_terms": keyword,
-        "ad_reached_countries": AD_REACHED_COUNTRIES,
+        "ad_reached_countries": json.dumps(AD_REACHED_COUNTRIES),
         "ad_active_status": "ACTIVE",
         "fields": AD_FIELDS,
         "limit": 500,
@@ -129,11 +133,16 @@ def _calc_days_active(ad_creation_time: str) -> int:
 
 
 def _filter_and_enrich(ads: list[dict], keyword: str) -> list[dict]:
+    """Mantiene solo los anuncios que superan el umbral mínimo (amarillo+verde).
+
+    El tier final (verde/amarillo/rojo) se calcula después, una vez agregadas
+    las señales de variedad creativa y multi-país por página (ver run()).
+    """
     enriched = []
     for ad in ads:
         creation_time = ad.get("ad_creation_time", "")
         days = _calc_days_active(creation_time)
-        if days < MIN_DAYS_ACTIVE:
+        if days < PERSISTENCE_YELLOW_DAYS:
             continue
         enriched.append(
             {
@@ -147,9 +156,65 @@ def _filter_and_enrich(ads: list[dict], keyword: str) -> list[dict]:
     return enriched
 
 
+def _check_multi_geo(token: str, page_name: str) -> bool:
+    """Chequea si la página tiene anuncios activos en mercados adicionales (capado)."""
+    params = {
+        "access_token": token,
+        "search_terms": page_name,
+        "ad_reached_countries": json.dumps(MULTI_GEO_CHECK_COUNTRIES),
+        "ad_active_status": "ACTIVE",
+        "fields": "id",
+        "limit": 1,
+    }
+    data = _fetch_page(token, params)
+    if data is None:
+        return False
+    return len(data.get("data", [])) > 0
+
+
+def _attach_signals(all_rows: list[dict], token: str) -> None:
+    """Agrega variedad creativa (sin costo de API) y expansión multi-país (capada),
+    y calcula el tier final de cada fila in-place."""
+    page_urls: dict[str, set] = {}
+    page_max_days: dict[str, int] = {}
+    for row in all_rows:
+        pn = row["page_name"]
+        page_urls.setdefault(pn, set()).add(row["ad_snapshot_url"])
+        page_max_days[pn] = max(page_max_days.get(pn, 0), row["dias_activo"])
+    creative_counts = {pn: len(urls) for pn, urls in page_urls.items()}
+
+    candidates = sorted(page_max_days.items(), key=lambda x: -x[1])[:MULTI_GEO_CHECK_LIMIT]
+    console.print(
+        f"\n[cyan]→ Verificando expansión multi-país para los {len(candidates)} "
+        f"candidatos más longevos...[/]"
+    )
+    multi_geo_map: dict[str, bool] = {}
+    for page_name, _ in candidates:
+        multi_geo_map[page_name] = _check_multi_geo(token, page_name)
+        time.sleep(0.3)
+
+    for row in all_rows:
+        pn = row["page_name"]
+        signals = score_signals(
+            row["dias_activo"], multi_geo_map.get(pn, False), creative_counts.get(pn, 1)
+        )
+        row["creative_variety"] = creative_counts.get(pn, 1)
+        row["multi_geo"] = multi_geo_map.get(pn, False)
+        row["tier"] = signals["tier"]
+
+
 def _save_csv(rows: list[dict], path: Path) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["keyword", "page_name", "ad_creation_time", "dias_activo", "ad_snapshot_url"]
+    fieldnames = [
+        "keyword",
+        "page_name",
+        "ad_creation_time",
+        "dias_activo",
+        "creative_variety",
+        "multi_geo",
+        "tier",
+        "ad_snapshot_url",
+    ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -160,26 +225,43 @@ def _save_csv(rows: list[dict], path: Path) -> None:
 def _print_summary(all_rows: list[dict], counts_by_keyword: dict[str, int]) -> None:
     console.rule("[bold cyan]RESUMEN FB Ad Library[/]")
 
-    # Totales por keyword
-    kw_table = Table(title="Anuncios encontrados por keyword (90+ días activos)", show_lines=True)
+    # Totales por keyword, desglosado por tier
+    tier_counts_by_kw: dict[str, dict[str, int]] = {}
+    for row in all_rows:
+        d = tier_counts_by_kw.setdefault(row["keyword"], {"green": 0, "yellow": 0})
+        d[row["tier"]] = d.get(row["tier"], 0) + 1
+
+    kw_table = Table(
+        title=f"Anuncios encontrados por keyword ({PERSISTENCE_YELLOW_DAYS}+ días activos)",
+        show_lines=True,
+    )
     kw_table.add_column("Keyword", style="cyan")
     kw_table.add_column("Total", justify="right", style="green")
+    kw_table.add_column("Verde", justify="right", style="bold green")
+    kw_table.add_column("Amarillo", justify="right", style="bold yellow")
     for kw, count in sorted(counts_by_keyword.items(), key=lambda x: -x[1]):
-        kw_table.add_row(kw, str(count))
+        tiers = tier_counts_by_kw.get(kw, {"green": 0, "yellow": 0})
+        kw_table.add_row(kw, str(count), str(tiers.get("green", 0)), str(tiers.get("yellow", 0)))
     console.print(kw_table)
 
     # Top 10 más longevos
     top10 = sorted(all_rows, key=lambda x: -x["dias_activo"])[:10]
     top_table = Table(title="Top 10 anuncios más longevos", show_lines=True)
     top_table.add_column("#", justify="right")
+    top_table.add_column("Tier", justify="center")
     top_table.add_column("Días activo", justify="right", style="bold yellow")
+    top_table.add_column("Multi-país", justify="center")
+    top_table.add_column("Creativos", justify="right")
     top_table.add_column("Página", style="magenta")
     top_table.add_column("Keyword", style="cyan")
     top_table.add_column("URL", style="blue")
     for i, row in enumerate(top10, 1):
         top_table.add_row(
             str(i),
+            semaforo_label(row["tier"]),
             str(row["dias_activo"]),
+            "Sí" if row["multi_geo"] else "—",
+            str(row["creative_variety"]),
             row["page_name"],
             row["keyword"],
             row["ad_snapshot_url"],
@@ -196,7 +278,7 @@ def run() -> None:
     console.rule("[bold cyan]Módulo 1 — FB Ad Library Scraper[/]")
     console.print(
         f"Buscando [bold]{len(KEYWORDS)}[/] keywords · "
-        f"filtro [bold]{MIN_DAYS_ACTIVE}+ días[/] activos · "
+        f"umbral mínimo [bold]{PERSISTENCE_YELLOW_DAYS}+ días[/] activos · "
         f"país: [bold]{', '.join(AD_REACHED_COUNTRIES)}[/]\n"
     )
 
@@ -219,6 +301,8 @@ def run() -> None:
     if not all_rows:
         console.print("[yellow]No se encontraron anuncios con los filtros aplicados.[/]")
         return
+
+    _attach_signals(all_rows, token)
 
     all_rows.sort(key=lambda x: -x["dias_activo"])
     output_path = OUTPUT_DIR / FB_OUTPUT_FILENAME

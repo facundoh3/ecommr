@@ -28,11 +28,19 @@ KEYWORDS = [
     "cable management",
 ]
 
-# Países donde se buscan los anuncios
+# Países donde se buscan los anuncios (mercado principal)
 AD_REACHED_COUNTRIES = ["US"]
 
-# Anuncios creados hace al menos N días (si llevan meses pagando = convierte)
-MIN_DAYS_ACTIVE = 90
+# Países adicionales para detectar señal de expansión multi-mercado.
+# Se consulta solo para los candidatos que ya superan el umbral amarillo
+# (ver utils/scoring.py), y como máximo MULTI_GEO_CHECK_LIMIT páginas por
+# corrida, para no multiplicar las llamadas a la API.
+MULTI_GEO_CHECK_COUNTRIES = ["GB", "AU"]
+MULTI_GEO_CHECK_LIMIT = 15
+
+# El umbral mínimo de días activo para incluir un anuncio ahora vive en
+# utils/scoring.py (PERSISTENCE_YELLOW_DAYS) junto con el resto del scoring
+# de 3 niveles, para no tener dos fuentes de verdad distintas.
 
 # Máximo de anuncios por keyword (None = todos)
 MAX_ADS_PER_KEYWORD = None
@@ -67,3 +75,29 @@ IIBB_MENDOZA_PCT = 0.03         # IIBB Mendoza 3%
 MARGIN_GREEN_THRESHOLD = 0.30   # > 30% → VERDE
 MARGIN_YELLOW_THRESHOLD = 0.15  # 15-30% → AMARILLO
                                   # < 15% → ROJO
+
+# ─── Módulo 4: Comparador Trends AR vs US ─────────────────────────────────
+# pytrends está sin mantenimiento (archivado desde abril 2025) y propenso a
+# 429 sin proxies. Estos valores controlan la ventana de comparación y los
+# reintentos antes de caer al link manual de Google Trends.
+TRENDS_TIMEFRAME = "today 12-m"
+TRENDS_HL = "en-US"
+TRENDS_TZ = 360
+TRENDS_GEO_AR = "AR"
+TRENDS_GEO_US = "US"
+TRENDS_RETRY_DELAYS = [5, 15]  # segundos entre reintentos tras el primer intento
+
+# ─── Módulo 5: Validador de demanda MercadoLibre ──────────────────────────
+ML_SITE_ID = "MLA"  # MLA = Argentina
+ML_SEARCH_ENDPOINT = "https://api.mercadolibre.com/sites/{site_id}/search"
+ML_USER_ENDPOINT = "https://api.mercadolibre.com/users/{seller_id}"
+
+# Cantidad de resultados a traer por búsqueda
+ML_SEARCH_LIMIT = 50
+
+# A cuántos de los primeros vendedores se les consulta reputación
+ML_TOP_N_SELLER_REPUTATION = 5
+
+# Tope de permalinks a scrapear buscando texto "vendidos" (best-effort,
+# riesgo de bloqueo de IP — por eso se mantiene bajo y es opt-in)
+ML_VENDIDOS_SCRAPE_CAP = 3

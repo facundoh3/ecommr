@@ -7,7 +7,6 @@ IIBB Mendoza y tipo de cambio.
 """
 
 import logging
-from rich.console import Console
 from rich.table import Table
 from rich.prompt import FloatPrompt, Confirm
 
@@ -19,18 +18,9 @@ from config import (
     ML_COMMISSION_PCT,
     USD_TO_ARS,
 )
+from utils.display import console, semaforo, semaforo_color
 
 logger = logging.getLogger(__name__)
-console = Console()
-
-
-def _semaforo(margin_net: float) -> str:
-    if margin_net > MARGIN_GREEN_THRESHOLD:
-        return "[bold green]VERDE ✓[/]"
-    elif margin_net >= MARGIN_YELLOW_THRESHOLD:
-        return "[bold yellow]AMARILLO ⚠[/]"
-    else:
-        return "[bold red]ROJO ✗[/]"
 
 
 def _ask_float(prompt: str, default: float) -> float:
@@ -117,11 +107,7 @@ def _print_results(inputs: dict, results: dict) -> None:
     t.add_row("  CPA Meta Ads", f"${inputs['cpa_ars']:,.0f}", pct(inputs["cpa_ars"]))
     t.add_row("")
 
-    net_color = (
-        "green" if results["net_margin_pct"] > MARGIN_GREEN_THRESHOLD
-        else "yellow" if results["net_margin_pct"] >= MARGIN_YELLOW_THRESHOLD
-        else "red"
-    )
+    net_color = semaforo_color(results["net_margin_pct"], MARGIN_GREEN_THRESHOLD, MARGIN_YELLOW_THRESHOLD)
     t.add_row(
         "[bold]Margen neto[/]",
         f"[bold {net_color}]${results['net_margin_ars']:,.0f}[/]",
@@ -135,8 +121,8 @@ def _print_results(inputs: dict, results: dict) -> None:
     )
 
     console.print(t)
-    semaforo = _semaforo(results["net_margin_pct"])
-    console.print(f"\n[bold]Semáforo:[/] {semaforo}\n")
+    semaforo_str = semaforo(results["net_margin_pct"], MARGIN_GREEN_THRESHOLD, MARGIN_YELLOW_THRESHOLD)
+    console.print(f"\n[bold]Semáforo:[/] {semaforo_str}\n")
 
     if results["cpa_ars"] > results["cpa_breakeven"]:
         console.print(

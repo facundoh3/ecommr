@@ -2,15 +2,21 @@
 Módulo 2 — Analizador de tienda Shopify competidora
 
 Dado una URL base de Shopify:
-1. Scrapea el producto más vendido (/collections/all?sort_by=best-selling)
-2. Scrapea el producto más nuevo (/collections/all?sort_by=created-descending)
-3. Cuenta anuncios activos en FB Ad Library para esa página
-4. Informa si SimilarWeb requiere consulta manual
+1. Producto más nuevo: intenta /products.json (estructurado, no depende del
+   theme) y si no está disponible cae a scrapear
+   /collections/all?sort_by=created-descending.
+2. Producto más vendido: scrapea /collections/all?sort_by=best-selling.
+   /products.json NO expone ningún campo de ventas/ranking público, así que
+   no hay forma de mejorar esta señal sin login o Storefront API — sigue
+   siendo HTML scraping.
+3. Cuenta anuncios activos en FB Ad Library para esa página.
+4. Informa si SimilarWeb requiere consulta manual.
 
 Nota: no se hace login ni se bypassean CAPTCHAs;
       funciona con stores que tienen el catálogo público.
 """
 
+import json
 import logging
 import os
 import re
@@ -20,7 +26,6 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from rich.console import Console
 from rich.panel import Panel
 
 from config import (
@@ -31,9 +36,9 @@ from config import (
     REQUEST_TIMEOUT,
     SCRAPER_USER_AGENT,
 )
+from utils.display import console
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
@@ -96,6 +101,46 @@ def _scrape_first_product(base_url: str, sort_param: str) -> dict | None:
     }
 
 
+def _fetch_products_json(base_url: str, limit: int = 250) -> list[dict] | None:
+    """Trae el catálogo público vía /products.json (más robusto que el HTML del theme).
+
+    Cubre hasta `limit` productos en una sola request (máximo que permite Shopify).
+    En catálogos con más de `limit` productos el más nuevo podría no estar en esta
+    página si el orden por defecto de la tienda no es cronológico — caso poco común
+    para las tiendas chicas/medianas que suele analizar este módulo.
+    """
+    url = f"{base_url}/products.json"
+    headers = {"User-Agent": SCRAPER_USER_AGENT}
+    try:
+        resp = requests.get(url, headers=headers, params={"limit": limit}, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.info("products.json no disponible en %s: %s", url, e)
+        return None
+
+    products = data.get("products")
+    if not isinstance(products, list) or not products:
+        return None
+    return products
+
+
+def _newest_from_products_json(products: list[dict], base_url: str) -> dict | None:
+    with_dates = [p for p in products if p.get("created_at")]
+    if not with_dates:
+        return None
+
+    newest = max(with_dates, key=lambda p: p["created_at"])
+    variants = newest.get("variants") or []
+    price = variants[0].get("price") if variants else None
+
+    return {
+        "name": newest.get("title", "(sin título)"),
+        "price": f"${price}" if price else "(precio no encontrado)",
+        "url": f"{base_url}/products/{newest.get('handle', '')}",
+    }
+
+
 def _get_page_name_from_url(store_url: str) -> str:
     """Extrae el nombre de dominio limpio para buscar en FB Ad Library."""
     parsed = urlparse(store_url)
@@ -117,7 +162,7 @@ def _count_fb_ads(page_name: str) -> int | None:
         "access_token": token,
         "search_page_ids": "",  # se usa search_terms con el nombre
         "search_terms": page_name,
-        "ad_reached_countries": AD_REACHED_COUNTRIES,
+        "ad_reached_countries": json.dumps(AD_REACHED_COUNTRIES),
         "ad_active_status": "ACTIVE",
         "fields": "id",
         "limit": 100,
@@ -160,13 +205,18 @@ def run() -> None:
     base_url = _normalize_url(raw_url)
     console.print(f"\nAnalizando [bold]{base_url}[/]...\n")
 
-    # 1. Producto más vendido
+    # 1. Producto más vendido — products.json no expone ranking de ventas,
+    #    así que esta señal solo se puede obtener scrapeando la colección.
     console.print("[cyan]→ Obteniendo producto más vendido...[/]")
     best_selling = _scrape_first_product(base_url, "best-selling")
 
-    # 2. Producto más nuevo
+    # 2. Producto más nuevo — se intenta primero /products.json (estructurado,
+    #    no depende del theme) y se cae al scraping HTML solo si no está disponible.
     console.print("[cyan]→ Obteniendo producto más nuevo...[/]")
-    newest = _scrape_first_product(base_url, "created-descending")
+    products_json = _fetch_products_json(base_url)
+    newest = _newest_from_products_json(products_json, base_url) if products_json else None
+    if not newest:
+        newest = _scrape_first_product(base_url, "created-descending")
 
     # 3. Conteo de anuncios en FB Ad Library
     page_name = _get_page_name_from_url(base_url)

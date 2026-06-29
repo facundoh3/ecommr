@@ -32,6 +32,8 @@ MENU = """
   [bold cyan]1.[/] FB Ad Library Scraper   — encontrar anuncios ganadores en EEUU
   [bold cyan]2.[/] Analizador de tienda     — analizar una Shopify competidora
   [bold cyan]3.[/] Calculadora de margen    — evaluar rentabilidad en Argentina
+  [bold cyan]4.[/] Trends AR vs US          — comparar interés de búsqueda
+  [bold cyan]5.[/] Validador de demanda ML  — señales de competencia en MercadoLibre
   [bold cyan]q.[/] Salir
 """
 
@@ -58,11 +60,17 @@ def main() -> None:
         elif choice == "3":
             from modules.margin_calc import run
             run()
+        elif choice == "4":
+            from modules.trends_analyzer import run
+            run()
+        elif choice == "5":
+            from modules.ml_validator import run
+            run()
         elif choice in ("q", "quit", "exit", "salir"):
             console.print("\n[dim]Hasta luego.[/]")
             break
         else:
-            console.print("[yellow]Opción inválida. Ingresá 1, 2, 3 o q.[/]")
+            console.print("[yellow]Opción inválida. Ingresá 1, 2, 3, 4, 5 o q.[/]")
 
 
 if __name__ == "__main__":
